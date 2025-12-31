@@ -14,19 +14,15 @@ import psycopg2
 from time import sleep
 from datetime import datetime
 
-# Настройки из окружения GitHub
 DATABASE_URL = os.environ.get('DATABASE_URL')
 QUERY = os.environ.get('QUERY', '')
 MANY = int(os.environ.get('MANY', 20))
 TASK_ID = os.environ.get('TASK_ID', 'github-task')
-MAX_WORKERS = 15 # Максимальная скорость на GitHub
-
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+MAX_WORKERS = 10 
 
 def save_to_db(data):
     try:
-        conn = get_db_connection()
+        conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO results (task_id, name, category, address, phone, rating, reviews_count, working_hours, website, social_links, url)
@@ -36,8 +32,7 @@ def save_to_db(data):
               data.get('website'), data.get('social_links'), data.get('url')))
         conn.commit()
         cursor.close(); conn.close()
-    except Exception as e:
-        print(f"DB Error: {e}")
+    except Exception as e: print(f"DB Error: {e}")
 
 def create_driver():
     options = webdriver.ChromeOptions()
@@ -46,35 +41,10 @@ def create_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-images")
-    options.add_argument("--blink-settings=imagesEnabled=false")
     options.add_argument("--window-size=1200,800")
     driver = webdriver.Chrome(options=options)
     stealth(driver, languages=["ru-RU", "ru"], vendor="Google Inc.", platform="Win32", webgl_vendor="Intel Inc.", renderer="Intel Iris OpenGL Engine", fix_hairline=True)
     return driver
-
-def get_links(search_query, limit):
-    driver = create_driver()
-    links = set()
-    try:
-        url = f"https://www.google.com/maps/search/{search_query.replace(' ', '+')}?hl=ru"
-        driver.get(url)
-        sleep(3)
-        last_len = 0
-        for _ in range(10): # Скроллим 10 раз
-            found = driver.find_elements(By.XPATH, '//a[contains(@href, "/maps/place/")]')
-            for f in found:
-                try:
-                    href = f.get_attribute('href')
-                    if href: links.add(href)
-                except: continue
-            if len(links) >= limit: break
-            driver.execute_script('try { document.querySelector("div[role=\'feed\']").scrollTop += 1000; } catch(e) {}')
-            sleep(1.5)
-            if len(links) == last_len: break
-            last_len = len(links)
-    finally:
-        driver.quit()
-    return list(links)
 
 def parse_details(url):
     driver = create_driver()
@@ -90,7 +60,6 @@ def parse_details(url):
         cat = soup.select_one('button[jsaction*="category"]')
         if cat: data['category'] = cat.get_text(strip=True)
         
-        # Упрощенный сбор остальных данных для скорости
         items = soup.find_all(['button', 'a'], attrs={'data-item-id': True})
         for item in items:
             iid = item.get('data-item-id', '')
@@ -100,16 +69,39 @@ def parse_details(url):
             elif 'authority' in iid: data['website'] = item.get('href', txt)
 
         save_to_db(data)
-        print(f"Done: {data['name']}")
+        print(f"✅ Спарсено: {data['name']}")
     finally:
         driver.quit()
 
 if __name__ == "__main__":
-    print(f"Starting Ultra Worker: {QUERY}")
-    all_links = get_links(QUERY, MANY)
-    print(f"Found {len(all_links)} links. Starting parallel parse...")
+    print(f"🚀 Запуск потокового воркера: {QUERY}")
+    driver = create_driver()
+    processed_links = set()
     
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        executor.map(parse_details, all_links[:MANY])
-    
-    print("All done!")
+    try:
+        url = f"https://www.google.com/maps/search/{QUERY.replace(' ', '+')}?hl=ru"
+        driver.get(url)
+        sleep(4)
+        
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            for _ in range(15): # Итерации скроллинга
+                found = driver.find_elements(By.XPATH, '//a[contains(@href, "/maps/place/")]')
+                new_links = []
+                for f in found:
+                    try:
+                        href = f.get_attribute('href')
+                        if href and href not in processed_links:
+                            processed_links.add(href)
+                            new_links.append(href)
+                    except: continue
+                
+                # Сразу запускаем парсинг новых найденных ссылок
+                if new_links:
+                    executor.map(parse_details, new_links)
+                
+                if len(processed_links) >= MANY: break
+                driver.execute_script('try { document.querySelector("div[role=\'feed\']").scrollTop += 2000; } catch(e) {}')
+                sleep(2)
+    finally:
+        driver.quit()
+    print("🏁 Воркер завершил работу")
