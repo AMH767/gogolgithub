@@ -1,0 +1,42 @@
+name: Google Maps Parse Worker
+
+on:
+  repository_dispatch:
+    types: [start-parsing]
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'Search Query'
+        required: true
+      many:
+        description: 'Number of results'
+        default: '20'
+      task_id:
+        description: 'Task ID'
+        required: true
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install selenium selenium-stealth beautifulsoup4 lxml pandas openpyxl psycopg2-binary requests
+
+      - name: Run Parser
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QUERY: ${{ github.event.client_payload.query || github.event.inputs.query }}
+          MANY: ${{ github.event.client_payload.many || github.event.inputs.many }}
+          TASK_ID: ${{ github.event.client_payload.task_id || github.event.inputs.task_id }}
+          MAX_WORKERS: 10
+        run: |
+          python worker.py
